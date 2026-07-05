@@ -8,6 +8,7 @@ import type {
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { promises as dns } from 'dns';
+import gravatarUrl from 'gravatar-url';
 import * as net from 'net';
 
 // Trusted-proxy entries may be DNS names (e.g. docker compose service
@@ -154,27 +155,58 @@ export const checkUser: Middleware = async (req, _res, next) => {
     // IDPs preserve the original case in property mappings (`Tina`). Without
     // this, every fresh deploy needs either per-user DB fix-ups or a manual
     // lowercasing expression in the IDP — surprising in both cases.
-    const qb = userRepository.createQueryBuilder('user');
+    //
+    // The user header is matched in two deterministic tiers rather than one
+    // OR across every username column: first the local username (the column
+    // auto-provisioning writes — identities this IDP created), then the
+    // media-server usernames. A tier that matches more than one user is
+    // ambiguous: sign nobody in (and don't auto-provision) rather than pick
+    // an arbitrary account.
+    let ambiguousHeaderMatch = false;
 
-    if (hasUserHeader && hasEmailHeader) {
-      // Both headers are configured, so BOTH must match. Do not fall through
-      // to single-field matching.
-      if (userValue !== '' && emailValue !== '') {
-        qb.where(
-          '(LOWER(user.jellyfinUsername) = LOWER(:user) OR LOWER(user.plexUsername) = LOWER(:user) OR LOWER(user.username) = LOWER(:user)) AND LOWER(user.email) = LOWER(:email)',
-          { user: userValue, email: emailValue }
+    const pickSingleMatch = (matches: User[], description: string) => {
+      if (matches.length > 1) {
+        ambiguousHeaderMatch = true;
+        logger.warn(
+          `Forward-auth ${description} matched multiple users; refusing to pick one`,
+          { label: 'Auth' }
         );
-        user = await qb.getOne();
+        return null;
       }
-    } else if (hasUserHeader && userValue !== '') {
-      qb.where(
-        'LOWER(user.jellyfinUsername) = LOWER(:user) OR LOWER(user.plexUsername) = LOWER(:user) OR LOWER(user.username) = LOWER(:user)',
-        { user: userValue }
-      );
-      user = await qb.getOne();
+      return matches[0] ?? null;
+    };
+
+    // When both headers are configured, BOTH must match. Do not fall through
+    // to single-field matching.
+    const emailClause = 'LOWER(user.email) = LOWER(:email)';
+    const requireEmail = hasUserHeader && hasEmailHeader;
+
+    if (hasUserHeader) {
+      if (userValue !== '' && (!requireEmail || emailValue !== '')) {
+        const tiers = [
+          'LOWER(user.username) = LOWER(:user)',
+          '(LOWER(user.jellyfinUsername) = LOWER(:user) OR LOWER(user.plexUsername) = LOWER(:user))',
+        ];
+        for (const tier of tiers) {
+          const matches = await userRepository
+            .createQueryBuilder('user')
+            .where(requireEmail ? `(${tier}) AND ${emailClause}` : tier, {
+              user: userValue,
+              email: emailValue,
+            })
+            .getMany();
+          user = pickSingleMatch(matches, 'user header');
+          if (user || ambiguousHeaderMatch) {
+            break;
+          }
+        }
+      }
     } else if (hasEmailHeader && emailValue !== '') {
-      qb.where('LOWER(user.email) = LOWER(:email)', { email: emailValue });
-      user = await qb.getOne();
+      const matches = await userRepository
+        .createQueryBuilder('user')
+        .where(emailClause, { email: emailValue })
+        .getMany();
+      user = pickSingleMatch(matches, 'email header');
     }
 
     // Auto-provision: if forward-auth identifies a new user that isn't in the
@@ -193,21 +225,25 @@ export const checkUser: Middleware = async (req, _res, next) => {
     const provisionUsername = userValue || emailLocalPart;
     if (
       !user &&
+      !ambiguousHeaderMatch &&
       settings.network.forwardAuth.autoProvision &&
       provisionUsername
     ) {
+      // Email is required NOT NULL — synthesise a stable placeholder when
+      // the IDP doesn't provide one. Admin can edit it afterwards.
+      const provisionEmail = emailValue || `${userValue}@forward-auth.local`;
       try {
         user = new User({
-          // Email is required NOT NULL — synthesise a stable placeholder when
-          // the IDP doesn't provide one. Admin can edit it afterwards.
-          email: emailValue || `${userValue}@forward-auth.local`,
+          email: provisionEmail,
           // Drives `displayName` (see the User entity's @AfterLoad) and is
           // what the user-header match above finds on subsequent requests.
           username: provisionUsername,
           permissions: settings.main.defaultPermissions,
           userType: UserType.LOCAL,
-          // Required NOT NULL column; resolved client-side via Gravatar/avatarproxy.
-          avatar: '',
+          // Same avatar as admin-created local users: Gravatar with the
+          // "mystery man" silhouette fallback. An empty string here renders
+          // as a broken <img> in the UI.
+          avatar: gravatarUrl(provisionEmail, { default: 'mm', size: 200 }),
         });
         await userRepository.save(user);
         logger.info(
