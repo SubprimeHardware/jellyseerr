@@ -1,4 +1,3 @@
-import { MediaServerType } from '@server/constants/server';
 import { UserType } from '@server/constants/user';
 import { getRepository } from '@server/datasource';
 import { User } from '@server/entity/User';
@@ -162,14 +161,14 @@ export const checkUser: Middleware = async (req, _res, next) => {
       // to single-field matching.
       if (userValue !== '' && emailValue !== '') {
         qb.where(
-          '(LOWER(user.jellyfinUsername) = LOWER(:user) OR LOWER(user.plexUsername) = LOWER(:user)) AND LOWER(user.email) = LOWER(:email)',
+          '(LOWER(user.jellyfinUsername) = LOWER(:user) OR LOWER(user.plexUsername) = LOWER(:user) OR LOWER(user.username) = LOWER(:user)) AND LOWER(user.email) = LOWER(:email)',
           { user: userValue, email: emailValue }
         );
         user = await qb.getOne();
       }
     } else if (hasUserHeader && userValue !== '') {
       qb.where(
-        'LOWER(user.jellyfinUsername) = LOWER(:user) OR LOWER(user.plexUsername) = LOWER(:user)',
+        'LOWER(user.jellyfinUsername) = LOWER(:user) OR LOWER(user.plexUsername) = LOWER(:user) OR LOWER(user.username) = LOWER(:user)',
         { user: userValue }
       );
       user = await qb.getOne();
@@ -180,10 +179,12 @@ export const checkUser: Middleware = async (req, _res, next) => {
 
     // Auto-provision: if forward-auth identifies a new user that isn't in the
     // DB, create one on the fly with the default permission set. Opt-in so
-    // existing deploys are unaffected. The userType matches whichever media
-    // server is configured (Plex/Jellyfin/Emby) so existing per-userType
-    // logic (avatars, server-specific UI) keeps working; falls back to
-    // LOCAL when no media server is configured.
+    // existing deploys are unaffected. Provisioned users are LOCAL: forward
+    // auth asserts an external (IDP) identity, not a media-server login, so
+    // inventing a Plex/Jellyfin link here would imply an association that
+    // doesn't exist. Users who DO have a media-server account are matched
+    // above (by plex/jellyfin/local username or email) and never reach this
+    // path.
     // Derive a username for provisioning. Prefer the user header when present,
     // otherwise fall back to the local-part of the email (everything before
     // '@'). This lets email-only setups (e.g. Cloudflare Access, which only
@@ -195,48 +196,23 @@ export const checkUser: Middleware = async (req, _res, next) => {
       settings.network.forwardAuth.autoProvision &&
       provisionUsername
     ) {
-      const mediaServerType = settings.main.mediaServerType;
-      const newUserType =
-        mediaServerType === MediaServerType.PLEX
-          ? UserType.PLEX
-          : mediaServerType === MediaServerType.JELLYFIN
-            ? UserType.JELLYFIN
-            : mediaServerType === MediaServerType.EMBY
-              ? UserType.EMBY
-              : UserType.LOCAL;
-
       try {
         user = new User({
           // Email is required NOT NULL — synthesise a stable placeholder when
           // the IDP doesn't provide one. Admin can edit it afterwards.
           email: emailValue || `${userValue}@forward-auth.local`,
-          // Only populate the media-server username columns when an actual
-          // user header was supplied — those are matched against the real
-          // Plex/Jellyfin/Emby account on subsequent requests, so we must not
-          // fill them with a guessed value derived from the email.
-          plexUsername:
-            newUserType === UserType.PLEX && userValue ? userValue : undefined,
-          jellyfinUsername:
-            (newUserType === UserType.JELLYFIN ||
-              newUserType === UserType.EMBY) &&
-            userValue
-              ? userValue
-              : undefined,
-          // When the User Header is blank (email-only auth, e.g. Cloudflare
-          // Access), use the local-part of the email as the username — this
-          // drives `displayName` (see the User entity's @AfterLoad). When a
-          // user header is present, leave this unset so media-server accounts
-          // keep displaying via plex/jellyfinUsername as before.
-          username: userValue ? undefined : emailLocalPart,
+          // Drives `displayName` (see the User entity's @AfterLoad) and is
+          // what the user-header match above finds on subsequent requests.
+          username: provisionUsername,
           permissions: settings.main.defaultPermissions,
-          userType: newUserType,
+          userType: UserType.LOCAL,
           // Required NOT NULL column; resolved client-side via Gravatar/avatarproxy.
           avatar: '',
         });
         await userRepository.save(user);
         logger.info(
           `Auto-provisioned user via forward-auth: ${provisionUsername}`,
-          { label: 'Auth', userId: user.id, userType: newUserType }
+          { label: 'Auth', userId: user.id, userType: UserType.LOCAL }
         );
       } catch (e) {
         logger.error(
