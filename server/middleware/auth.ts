@@ -19,7 +19,23 @@ export const checkUser: Middleware = async (req, _res, next) => {
 
   // Check if the remoteSocketAddress we received the request
   // from is trusted!
-  const socketAddress = req.socket.remoteAddress || '';
+  const rawSocketAddress = req.socket.remoteAddress || '';
+  const isLoopbackSocket =
+    rawSocketAddress.replace(/^::ffff:/, '') === '127.0.0.1' ||
+    rawSocketAddress === '::1';
+
+  // Next.js SSR re-issues the browser's request against loopback and copies
+  // the forward-auth headers over (see getAuthHeaders). Trusting the loopback
+  // hop itself would honor identity headers that arrived over an UNTRUSTED
+  // path on every server-rendered page. getAuthHeaders forwards the original
+  // peer address; when present, evaluate trust against that peer instead.
+  // Only a loopback socket may assert this header — a remote client sending
+  // it directly is still judged by its own socket address.
+  const ssrForwardedAddress = isLoopbackSocket
+    ? req.header('x-seerr-original-addr')
+    : undefined;
+
+  const socketAddress = ssrForwardedAddress || rawSocketAddress;
   const ipv4NormalizedSocketAddress = socketAddress.replace(/^::ffff:/, '');
 
   if (net.isIPv4(ipv4NormalizedSocketAddress)) {
