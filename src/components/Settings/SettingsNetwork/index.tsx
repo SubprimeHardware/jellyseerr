@@ -36,6 +36,8 @@ const messages = defineMessages('components.Settings.SettingsNetwork', {
   trustProxyTip:
     'Allow Seerr to correctly register client IP addresses behind a proxy',
   trustedProxies: 'Trusted Proxies',
+  trustedProxiesTip:
+    'Comma-separated list of IP addresses and/or DNS names (e.g. docker service names). CIDR ranges are not supported.',
   forwardAuthEnabled: 'Enable Proxy Forward Authentication',
   forwardAuthEnabledTip:
     'Authenticate as the user specified by the headers. Only enable when secured behind a trusted proxy.',
@@ -139,10 +141,14 @@ const SettingsNetwork = () => {
                 .map((value) => value.trim())
                 .filter((value) => value.length > 0);
               for (const address of addresses) {
+                // Reject CIDR explicitly: Address4/6.isValid accept ranges,
+                // but the server matches exact addresses only, so a range
+                // would validate and then silently never match.
                 if (
-                  !Address4.isValid(address) &&
-                  !Address6.isValid(address) &&
-                  !HOSTNAME_REGEX.test(address)
+                  address.includes('/') ||
+                  (!Address4.isValid(address) &&
+                    !Address6.isValid(address) &&
+                    !HOSTNAME_REGEX.test(address))
                 ) {
                   return ctx.createError({
                     message: intl.formatMessage(messages.invalidAddress, {
@@ -356,6 +362,9 @@ const SettingsNetwork = () => {
                             badgeType="advanced"
                             className="mr-2"
                           />
+                          <span className="label-tip">
+                            {intl.formatMessage(messages.trustedProxiesTip)}
+                          </span>
                         </label>
                         <div className="form-input-area">
                           <Field
