@@ -8,7 +8,70 @@ import type {
 } from '@server/lib/permissions';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
+import { promises as dns } from 'dns';
 import * as net from 'net';
+
+// Trusted-proxy entries may be DNS names (e.g. docker compose service
+// names). They are resolved at request time so trust follows container
+// recreations instead of a stale address, with two freshness rules: a
+// matching answer is reused for up to TTL_MS, and a non-matching answer is
+// re-resolved at most once per RERESOLVE_MS so an address change is picked
+// up immediately without letting untrusted clients turn every request into
+// a DNS query. Resolution fails closed: a name that doesn't resolve trusts
+// nothing.
+const TRUSTED_HOSTNAME_TTL_MS = 30 * 1000;
+const TRUSTED_HOSTNAME_RERESOLVE_MS = 2 * 1000;
+
+const trustedHostnameCache = new Map<
+  string,
+  { addresses: string[]; resolvedAt: number }
+>();
+
+const resolveTrustedHostname = async (hostname: string): Promise<string[]> => {
+  try {
+    const results = await dns.lookup(hostname, { all: true });
+    return results.map((result) => result.address.replace(/^::ffff:/, ''));
+  } catch {
+    return [];
+  }
+};
+
+const isTrustedProxyHostname = async (
+  candidateAddresses: string[],
+  hostnames: string[]
+): Promise<boolean> => {
+  for (const hostname of hostnames) {
+    let entry = trustedHostnameCache.get(hostname);
+
+    if (!entry || Date.now() - entry.resolvedAt > TRUSTED_HOSTNAME_TTL_MS) {
+      entry = {
+        addresses: await resolveTrustedHostname(hostname),
+        resolvedAt: Date.now(),
+      };
+      trustedHostnameCache.set(hostname, entry);
+    }
+
+    if (entry.addresses.some((addr) => candidateAddresses.includes(addr))) {
+      return true;
+    }
+
+    // No match: the container behind this name may have just been recreated
+    // with a new address — re-resolve, rate-limited.
+    if (Date.now() - entry.resolvedAt > TRUSTED_HOSTNAME_RERESOLVE_MS) {
+      entry = {
+        addresses: await resolveTrustedHostname(hostname),
+        resolvedAt: Date.now(),
+      };
+      trustedHostnameCache.set(hostname, entry);
+
+      if (entry.addresses.some((addr) => candidateAddresses.includes(addr))) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+};
 
 export const checkUser: Middleware = async (req, _res, next) => {
   const settings = getSettings();
@@ -46,6 +109,18 @@ export const checkUser: Middleware = async (req, _res, next) => {
     trustedProxy =
       socketAddress === '::1' ||
       settings.network.trustedProxies.v6.includes(socketAddress);
+  }
+
+  if (
+    !trustedProxy &&
+    settings.network.trustProxy &&
+    settings.network.forwardAuth.enabled &&
+    (settings.network.trustedProxies.hostnames ?? []).length > 0
+  ) {
+    trustedProxy = await isTrustedProxyHostname(
+      [ipv4NormalizedSocketAddress, socketAddress],
+      settings.network.trustedProxies.hostnames
+    );
   }
 
   if (req.header('X-API-Key') === settings.main.apiKey) {
