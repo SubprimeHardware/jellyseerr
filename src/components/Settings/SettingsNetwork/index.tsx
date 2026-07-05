@@ -15,6 +15,12 @@ import { useIntl } from 'react-intl';
 import useSWR, { mutate } from 'swr';
 import * as Yup from 'yup';
 
+// RFC 1123 hostname (plus underscore, which docker container names allow).
+// Trusted-proxy entries that aren't literal IPs are validated against this
+// and resolved via DNS at request time on the server.
+const HOSTNAME_REGEX =
+  /^[a-zA-Z0-9_]([a-zA-Z0-9_-]{0,61}[a-zA-Z0-9_])?(\.[a-zA-Z0-9_]([a-zA-Z0-9_-]{0,61}[a-zA-Z0-9_])?)*$/;
+
 const messages = defineMessages('components.Settings.SettingsNetwork', {
   toastSettingsSuccess: 'Settings saved successfully!',
   toastSettingsFailure: 'Something went wrong while saving settings.',
@@ -71,9 +77,7 @@ const messages = defineMessages('components.Settings.SettingsNetwork', {
   apiRequestTimeoutTip:
     'Maximum time (in seconds) to wait for responses from external services like Radarr/Sonarr. Set to 0 for no timeout.',
   validationApiRequestTimeout: 'You must provide a valid timeout value',
-  invalidIpv4: 'Invalid IPv4 address: {address}',
-  invalidIpv6: 'Invalid IPv6 address: {address}',
-  invalidAddress: 'Invalid address: {address}',
+  invalidAddress: 'Invalid IP address or hostname: {address}',
 });
 
 const SettingsNetwork = () => {
@@ -130,25 +134,16 @@ const SettingsNetwork = () => {
               if (!value) {
                 return true;
               }
-              const addresses = value.split(',').map((value) => value.trim());
+              const addresses = value
+                .split(',')
+                .map((value) => value.trim())
+                .filter((value) => value.length > 0);
               for (const address of addresses) {
-                if (address.indexOf('.') != -1) {
-                  if (!Address4.isValid(address)) {
-                    return ctx.createError({
-                      message: intl.formatMessage(messages.invalidIpv4, {
-                        address,
-                      }),
-                    });
-                  }
-                } else if (address.indexOf(':') != -1) {
-                  if (!Address6.isValid(address)) {
-                    return ctx.createError({
-                      message: intl.formatMessage(messages.invalidIpv6, {
-                        address,
-                      }),
-                    });
-                  }
-                } else {
+                if (
+                  !Address4.isValid(address) &&
+                  !Address6.isValid(address) &&
+                  !HOSTNAME_REGEX.test(address)
+                ) {
                   return ctx.createError({
                     message: intl.formatMessage(messages.invalidAddress, {
                       address,
@@ -193,16 +188,11 @@ const SettingsNetwork = () => {
     return <LoadingSpinner />;
   }
 
-  let trustedProxies = '';
-  const ipv4 = data?.trustedProxies.v4.join(', ') ?? '';
-  const ipv6 = data?.trustedProxies.v6.join(', ') ?? '';
-  if (ipv4.length > 0 && ipv6.length > 0) {
-    trustedProxies = `${ipv4}, ${ipv6}`;
-  } else if (ipv4.length > 0) {
-    trustedProxies = ipv4;
-  } else if (ipv6.length > 0) {
-    trustedProxies = ipv6;
-  }
+  const trustedProxies = [
+    ...(data?.trustedProxies.v4 ?? []),
+    ...(data?.trustedProxies.v6 ?? []),
+    ...(data?.trustedProxies.hostnames ?? []),
+  ].join(', ');
 
   return (
     <>
@@ -252,16 +242,26 @@ const SettingsNetwork = () => {
           validationSchema={NetworkSettingsSchema}
           onSubmit={async (values) => {
             try {
-              const trustedProxies: { v4: string[]; v6: string[] } = {
+              const trustedProxies: {
+                v4: string[];
+                v6: string[];
+                hostnames: string[];
+              } = {
                 v4: [],
                 v6: [],
+                hostnames: [],
               };
               for (let value of values.trustedProxies.split(',')) {
                 value = value.trim();
-                if (value.indexOf('.') != -1) {
+                if (!value) {
+                  continue;
+                }
+                if (Address4.isValid(value)) {
                   trustedProxies.v4.push(value);
-                } else if (value.indexOf(':') != -1) {
+                } else if (Address6.isValid(value)) {
                   trustedProxies.v6.push(value);
+                } else {
+                  trustedProxies.hostnames.push(value);
                 }
               }
 
