@@ -1072,6 +1072,7 @@
   "components.Settings.SettingsNetwork.trustProxy": "Enable Proxy Support",
   "components.Settings.SettingsNetwork.trustProxyTip": "Allow Seerr to correctly register client IP addresses behind a proxy",
   "components.Settings.SettingsNetwork.trustedProxies": "Trusted Proxies",
+  "components.Settings.SettingsNetwork.trustedProxiesTip": "Comma-separated list of IP addresses and/or DNS names (e.g. docker service names). CIDR ranges are not supported.",
   "components.Settings.SettingsNetwork.userHeaderName": "User Header Name",
   "components.Settings.SettingsNetwork.userHeaderNameTip": "Matched against Jellyfin or Plex Username",
   "components.Settings.SettingsNetwork.validationApiRequestTimeout": "You must provide a valid timeout value",
